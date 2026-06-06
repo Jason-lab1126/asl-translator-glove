@@ -1,30 +1,58 @@
 # ASL Translator Glove
 
-EE 446 TinyML Final Project — Spring 2026
-University of Washington
+A wearable that recognizes American Sign Language gestures and speaks them out loud — running entirely on a $30 microcontroller.
 
-**Team:** Jayson, Carter, Ananya, Praxides
+EE 446 TinyML Final Project · University of Washington · Spring 2026
 
-A wearable that recognizes American Sign Language gestures using IMU data
-and a quantized 1D-CNN running entirely on Arduino Nano 33 BLE Sense.
-Recognized signs are streamed over BLE for real-time display and speech output.
+---
+
+## What it does
+
+You wear the device on your hand, sign one of 8 ASL words, and the system identifies the gesture in under 50ms and streams the result over Bluetooth to a paired display that speaks it aloud through TTS. Everything inference-side runs on-device — no cloud, no phone-side ML, no internet.
+
+**Vocabulary (v1):** HELLO, THANK YOU, HELP, GOODBYE, STOP, MORE, EAT, WATER
+
+Chosen for motion separability — IMU alone can't disambiguate hand-shape-dominant signs, so we picked signs with distinct motion signatures.
+
+## Why this matters
+
+Roughly 70 million people worldwide use sign language as their primary form of communication. The US alone has about 11.8 million deaf or hard-of-hearing individuals but only 2,300 certified ASL interpreters. Real-time interpretation hardware exists but it's either expensive, cloud-dependent, or both. We wanted to see how far you can push that with a $30 board and a 200KB model.
+
+## How it works
+
+IMU (6-axis) → Window buffer → 1D-CNN (int8 quantized) → Confidence threshold → BLE → Web display + TTS
+
+| Stage | What happens |
+|---|---|
+| Data collection | 4 signers, ~25 reps × 8 signs, IMU streamed via Edge Impulse |
+| Model | 1D-CNN, custom architecture, trained in TensorFlow |
+| Compression | INT8 post-training quantization, target <200KB |
+| Deployment | Arduino sketch with BLE characteristic + confidence-threshold rejection |
+| Display | Web Bluetooth app with live gesture, sentence builder, and TTS |
 
 ## Hardware
-- Arduino Nano 33 BLE Sense (IMU: LSM9DS1)
 
-## Pipeline
-Data Collection → 1D-CNN Training → Quantization → Arduino Deployment → BLE Output
+Arduino Nano 33 BLE Sense (LSM9DS1 IMU, 256KB RAM, 1MB flash, BLE 5.0)
 
-## Repo Structure
-- `/data` — IMU recordings and labels
-- `/model` — Training notebooks, architectures, saved models
-- `/compression` — Quantization scripts, before/after metrics
-- `/deployment` — Arduino sketch, BLE protocol, profiling results
-- `/webapp` — Web Bluetooth demo app
-- `/report` — Final report and figures
+## Repo layout
 
-## Track Ownership
-- **Data:** TBD
-- **Model:** Praxides
-- **Compression:** Carter
-- **Deployment:** Jayson
+- data/ — IMU recordings, labeling protocol, sample CSVs
+- model/ — Training notebooks, saved checkpoints
+- compression/ — Quantization scripts, accuracy/size/latency comparison tables
+- deployment/ — Arduino sketch, BLE protocol, on-device profiling
+- webapp/ — Web Bluetooth demo (Apple/Tesla-style UI, sentence builder, TTS)
+- report/ — Final report, figures
+- INTERFACE.md — Model ↔ deployment contract (input shape, output format, BLE schema)
+
+## Team
+
+| Track | Owner |
+|---|---|
+| Data collection + labeling | Carter |
+| Model architecture + training | Praxides |
+| Compression + quantization | papoochu |
+| Deployment + BLE + web app + system integration | Jayson |
+
+## Status
+
+Active development. Pipeline validated end-to-end on Lab 9 baseline. Working on real data + production model.
