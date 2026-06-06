@@ -40,7 +40,7 @@ Arduino Nano 33 BLE Sense (LSM9DS1 IMU, 256KB RAM, 1MB flash, BLE 5.0)
 - model/ — Training notebooks, saved checkpoints
 - compression/ — Quantization scripts, accuracy/size/latency comparison tables
 - deployment/ — Arduino sketch, BLE protocol, on-device profiling
-- webapp/ — Web Bluetooth demo (Apple/Tesla-style UI, sentence builder, TTS)
+- webapp/ — Web Bluetooth demo
 - report/ — Final report, figures
 - INTERFACE.md — Model ↔ deployment contract (input shape, output format, BLE schema)
 
