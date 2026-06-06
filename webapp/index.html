@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ASL Translator Glove</title>
+  <style>
+    /* ─── Reset & Base ─────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #000;
+      --accent: #0071e3;
+      --border: rgba(255, 255, 255, 0.08);
+      --text-primary: #f5f5f7;
+      --text-secondary: #86868b;
+      --text-muted: #86868b;
+      --radius: 12px;
+    }
+
+    body {
+      font-family: -apple-system, "SF Pro Display", "Inter", BlinkMacSystemFont, sans-serif;
+      background: var(--bg);
+      color: var(--text-primary);
+      min-height: 100dvh;
+      overflow-x: hidden;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ─── Layout ───────────────────────────────────────────────────── */
+    .app {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 3rem 1.5rem 4rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+    }
+
+    /* ─── Sections ─────────────────────────────────────────────────── */
+    .section {
+      padding: 2.5rem 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .section:first-child {
+      padding-top: 0;
+    }
+
+    .section:last-of-type {
+      border-bottom: none;
+    }
+
+    /* ─── Header ───────────────────────────────────────────────────── */
+    .header {
+      text-align: center;
+      padding-bottom: 2.5rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .header h1 {
+      font-size: clamp(1.125rem, 3vw, 1.375rem);
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      color: var(--text-primary);
+    }
+
+    .header .subtitle {
+      font-size: 12px;
+      color: var(--text-secondary);
+      margin-top: 0.5rem;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+    }
+
+    /* ─── Connection Status ────────────────────────────────────────── */
+    .connection {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.625rem;
+      font-size: 13px;
+      color: var(--text-secondary);
+      padding: 1.75rem 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .connection-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--accent);
+      flex-shrink: 0;
+    }
+
+    /* ─── Main Gesture Display ─────────────────────────────────────── */
+    .gesture-display {
+      text-align: center;
+      padding: 3.5rem 0 2.5rem;
+      min-height: 200px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .gesture-word {
+      font-size: clamp(80px, 18vw, 200px);
+      font-weight: 700;
+      letter-spacing: -0.04em;
+      line-height: 1;
+      color: var(--text-primary);
+      animation: gestureFade 200ms ease;
+    }
+
+    .gesture-word.unknown {
+      color: var(--text-secondary);
+    }
+
+    .gesture-word.active {
+      color: var(--text-primary);
+    }
+
+    .gesture-word.idle {
+      font-size: clamp(48px, 10vw, 80px);
+      color: var(--text-secondary);
+      font-weight: 300;
+      animation: none;
+    }
+
+    @keyframes gestureFade {
+      0%   { opacity: 0; }
+      100% { opacity: 1; }
+    }
+
+    /* ─── Metrics Row ──────────────────────────────────────────────── */
+    .metrics {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 3rem;
+      flex-wrap: wrap;
+      margin-top: 2rem;
+    }
+
+    .metric {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.375rem;
+    }
+
+    .metric-label {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.15em;
+      color: var(--text-secondary);
+    }
+
+    .metric-value {
+      font-size: 1.5rem;
+      font-weight: 300;
+      font-variant-numeric: tabular-nums;
+      color: var(--text-primary);
+    }
+
+    /* ─── Confidence Bar ───────────────────────────────────────────── */
+    .confidence-bar-wrap {
+      width: 100%;
+      max-width: 280px;
+      margin: 2rem auto 0;
+    }
+
+    .confidence-bar-track {
+      height: 2px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 1px;
+      overflow: hidden;
+    }
+
+    .confidence-bar-fill {
+      height: 100%;
+      width: 0%;
+      border-radius: 1px;
+      background: var(--accent);
+      transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .confidence-bar-fill.low {
+      background: rgba(255, 255, 255, 0.25);
+    }
+
+    /* ─── History Feed ─────────────────────────────────────────────── */
+    .section-title {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.15em;
+      color: var(--text-secondary);
+      margin-bottom: 1.25rem;
+    }
+
+    .history-list {
+      display: flex;
+      flex-direction: column;
+      min-height: 2rem;
+    }
+
+    .history-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.875rem 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.9375rem;
+      animation: historyFade 200ms ease;
+    }
+
+    .history-item:last-child {
+      border-bottom: none;
+    }
+
+    @keyframes historyFade {
+      0%   { opacity: 0; }
+      100% { opacity: 1; }
+    }
+
+    .history-gesture {
+      font-weight: 400;
+      color: var(--text-primary);
+      letter-spacing: -0.01em;
+    }
+
+    .history-time {
+      color: var(--text-secondary);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: 0.02em;
+    }
+
+    .history-empty {
+      color: var(--text-secondary);
+      font-size: 0.875rem;
+      font-weight: 300;
+      text-align: center;
+      padding: 1rem 0;
+    }
+
+    /* ─── Demo Buttons ─────────────────────────────────────────────── */
+    .demo-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 0.625rem;
+    }
+
+    @media (max-width: 480px) {
+      .demo-grid { grid-template-columns: repeat(2, 1fr); }
+      .app { padding: 2rem 1.25rem 3rem; }
+      .gesture-display { padding: 2.5rem 0 2rem; }
+      .metrics { gap: 2rem; }
+    }
+
+    .demo-btn {
+      padding: 0.875rem 0.5rem;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: var(--radius);
+      background: transparent;
+      color: var(--text-primary);
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: background 100ms ease, transform 100ms ease;
+    }
+
+    .demo-btn:hover {
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .demo-btn:active {
+      transform: scale(0.98);
+    }
+
+    .demo-btn.unknown-btn {
+      grid-column: 1 / -1;
+      color: var(--text-secondary);
+      border-color: rgba(255, 255, 255, 0.12);
+    }
+
+    /* ─── Sentence Builder ─────────────────────────────────────────── */
+    .sentence-display {
+      min-height: 3.5rem;
+      padding: 1.25rem 0;
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      font-size: 1.0625rem;
+      font-weight: 400;
+      word-break: break-word;
+      color: var(--text-primary);
+      letter-spacing: -0.01em;
+      line-height: 1.6;
+    }
+
+    .sentence-display.empty {
+      color: var(--text-secondary);
+      font-weight: 300;
+      font-size: 0.9375rem;
+    }
+
+    .sentence-actions {
+      display: flex;
+      gap: 0.625rem;
+      margin-top: 1.25rem;
+    }
+
+    .action-btn {
+      flex: 1;
+      padding: 0.875rem 1rem;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: var(--radius);
+      background: transparent;
+      color: var(--text-primary);
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 500;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: background 100ms ease, transform 100ms ease, border-color 100ms ease;
+    }
+
+    .action-btn:hover {
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .action-btn:active {
+      transform: scale(0.98);
+    }
+
+    .action-btn.primary:active,
+    .action-btn.primary.speaking {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+
+    /* ─── Footer ───────────────────────────────────────────────────── */
+    .footer {
+      text-align: center;
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+      padding-top: 2.5rem;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="app">
+
+    <!-- Header -->
+    <header class="header">
+      <h1>ASL Translator Glove</h1>
+      <p class="subtitle">EE 446 TinyML Final Project — UW Spring 2026</p>
+    </header>
+
+    <!-- Connection Status -->
+    <div class="connection">
+      <span class="connection-dot" aria-hidden="true"></span>
+      <span>Connected to Jayson-Arduino</span>
+    </div>
+
+    <!-- Main Gesture Display -->
+    <section class="gesture-display" aria-live="polite" aria-atomic="true">
+      <div class="gesture-word idle" id="gestureWord">—</div>
+      <div class="metrics">
+        <div class="metric">
+          <span class="metric-label">Confidence</span>
+          <span class="metric-value" id="confidenceValue">—</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Latency</span>
+          <span class="metric-value" id="latencyValue">—</span>
+        </div>
+      </div>
+      <div class="confidence-bar-wrap">
+        <div class="confidence-bar-track">
+          <div class="confidence-bar-fill" id="confidenceBar"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- History -->
+    <section class="section">
+      <div class="section-title">Recent Gestures</div>
+      <div class="history-list" id="historyList">
+        <div class="history-empty">No gestures yet — tap a button below</div>
+      </div>
+    </section>
+
+    <!-- Demo Buttons -->
+    <section class="section">
+      <div class="section-title">Simulate Gesture</div>
+      <div class="demo-grid" id="demoGrid">
+        <button class="demo-btn" data-gesture="HELLO">HELLO</button>
+        <button class="demo-btn" data-gesture="THANK_YOU">THANK_YOU</button>
+        <button class="demo-btn" data-gesture="HELP">HELP</button>
+        <button class="demo-btn" data-gesture="GOODBYE">GOODBYE</button>
+        <button class="demo-btn" data-gesture="STOP">STOP</button>
+        <button class="demo-btn" data-gesture="MORE">MORE</button>
+        <button class="demo-btn" data-gesture="EAT">EAT</button>
+        <button class="demo-btn" data-gesture="WATER">WATER</button>
+        <button class="demo-btn unknown-btn" data-gesture="UNKNOWN">UNKNOWN</button>
+      </div>
+    </section>
+
+    <!-- Sentence Builder -->
+    <section class="section">
+      <div class="section-title">Sentence Builder</div>
+      <div class="sentence-display empty" id="sentenceDisplay">Tap gestures to build a sentence…</div>
+      <div class="sentence-actions">
+        <button class="action-btn" id="clearBtn">Clear</button>
+        <button class="action-btn primary" id="speakSentenceBtn">Speak Sentence</button>
+      </div>
+    </section>
+
+    <footer class="footer">Demo mode — BLE integration coming soon</footer>
+  </div>
+
+  <script>
+    /* ═══════════════════════════════════════════════════════════════════
+       ASL Translator Glove — Demo Frontend
+
+       BLE integration point: call onGestureReceived(gesture, confidence, latency)
+       whenever the glove sends a recognized gesture over Bluetooth.
+       ═══════════════════════════════════════════════════════════════════ */
+
+    // ─── Constants ────────────────────────────────────────────────────
+    const MAX_HISTORY = 5;
+
+    const SPEAK_MAP = {
+      HELLO: 'hello',
+      THANK_YOU: 'thank you',
+      HELP: 'help',
+      GOODBYE: 'goodbye',
+      STOP: 'stop',
+      MORE: 'more',
+      EAT: 'eat',
+      WATER: 'water',
+    };
+
+    // ─── State ────────────────────────────────────────────────────────
+    const history = [];
+    let sentence = [];
+
+    // ─── DOM refs ─────────────────────────────────────────────────────
+    const gestureWordEl    = document.getElementById('gestureWord');
+    const confidenceValue  = document.getElementById('confidenceValue');
+    const latencyValue     = document.getElementById('latencyValue');
+    const confidenceBar    = document.getElementById('confidenceBar');
+    const historyList      = document.getElementById('historyList');
+    const sentenceDisplay  = document.getElementById('sentenceDisplay');
+    const demoGrid         = document.getElementById('demoGrid');
+    const speakSentenceBtn = document.getElementById('speakSentenceBtn');
+
+    // ─── Core API ─────────────────────────────────────────────────────
+
+    /**
+     * Entry point for gesture recognition (simulated or from BLE).
+     * @param {string} gesture    - e.g. "HELLO" or "UNKNOWN"
+     * @param {number} confidence - 0–100 percentage
+     * @param {number} latency    - inference time in ms
+     */
+    function onGestureReceived(gesture, confidence, latency) {
+      updateMainDisplay(gesture, confidence, latency);
+      addToHistory(gesture);
+
+      if (gesture !== 'UNKNOWN') {
+        appendToSentence(gesture);
+        speakWord(gesture);
+      }
+    }
+
+    // Expose for future BLE handler
+    window.onGestureReceived = onGestureReceived;
+
+    // ─── Display ──────────────────────────────────────────────────────
+
+    function updateMainDisplay(gesture, confidence, latency) {
+      const isUnknown = gesture === 'UNKNOWN';
+
+      // Re-trigger entrance animation
+      gestureWordEl.style.animation = 'none';
+      gestureWordEl.offsetHeight; // force reflow
+      gestureWordEl.style.animation = '';
+
+      gestureWordEl.textContent = gesture.replace(/_/g, ' ');
+      gestureWordEl.className = 'gesture-word ' + (isUnknown ? 'unknown' : 'active');
+
+      confidenceValue.textContent = confidence + '%';
+      latencyValue.textContent = latency + ' ms';
+
+      confidenceBar.style.width = confidence + '%';
+      confidenceBar.classList.toggle('low', isUnknown || confidence < 70);
+    }
+
+    function addToHistory(gesture) {
+      history.unshift({ gesture, timestamp: Date.now() });
+      if (history.length > MAX_HISTORY) history.pop();
+      renderHistory();
+    }
+
+    function renderHistory() {
+      if (history.length === 0) {
+        historyList.innerHTML = '<div class="history-empty">No gestures yet — tap a button below</div>';
+        return;
+      }
+
+      historyList.innerHTML = history.map((item, i) => `
+        <div class="history-item" style="animation-delay:${i * 0.05}s">
+          <span class="history-gesture">${item.gesture.replace(/_/g, ' ')}</span>
+          <span class="history-time">${formatRelativeTime(item.timestamp)}</span>
+        </div>
+      `).join('');
+    }
+
+    function formatRelativeTime(ts) {
+      const secs = Math.floor((Date.now() - ts) / 1000);
+      if (secs < 1) return 'just now';
+      if (secs === 1) return '1s ago';
+      if (secs < 60) return secs + 's ago';
+      const mins = Math.floor(secs / 60);
+      return mins === 1 ? '1m ago' : mins + 'm ago';
+    }
+
+    // ─── Sentence Builder ─────────────────────────────────────────────
+
+    function appendToSentence(gesture) {
+      sentence.push(gesture.replace(/_/g, ' '));
+      renderSentence();
+    }
+
+    function renderSentence() {
+      if (sentence.length === 0) {
+        sentenceDisplay.textContent = 'Tap gestures to build a sentence…';
+        sentenceDisplay.classList.add('empty');
+      } else {
+        sentenceDisplay.textContent = sentence.join(' ');
+        sentenceDisplay.classList.remove('empty');
+      }
+    }
+
+    function clearSentence() {
+      sentence = [];
+      renderSentence();
+    }
+
+    function speakSentence() {
+      if (sentence.length === 0) return;
+      speakText(sentence.join(' '), true);
+    }
+
+    // ─── Text-to-Speech ───────────────────────────────────────────────
+
+    function speakWord(gesture) {
+      const text = SPEAK_MAP[gesture];
+      if (text) speakText(text);
+    }
+
+    function speakText(text, highlightSpeakBtn = false) {
+      if (!window.speechSynthesis) return;
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.rate = 0.95;
+      utterance.pitch = 1;
+
+      if (highlightSpeakBtn) {
+        speakSentenceBtn.classList.add('speaking');
+        utterance.onend = () => speakSentenceBtn.classList.remove('speaking');
+        utterance.onerror = () => speakSentenceBtn.classList.remove('speaking');
+      }
+
+      window.speechSynthesis.speak(utterance);
+    }
+
+    // ─── Simulation (remove when BLE is wired up) ───────────────────
+
+    function randomConfidence() {
+      return Math.floor(Math.random() * 30) + 70;
+    }
+
+    function randomLatency() {
+      return Math.floor(Math.random() * 46) + 5;
+    }
+
+    function simulateGesture(gesture) {
+      if (gesture === 'UNKNOWN') {
+        onGestureReceived('UNKNOWN', Math.floor(Math.random() * 20) + 30, randomLatency());
+      } else {
+        onGestureReceived(gesture, randomConfidence(), randomLatency());
+      }
+    }
+
+    // ─── Event Listeners ──────────────────────────────────────────────
+
+    demoGrid.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-gesture]');
+      if (!btn) return;
+      simulateGesture(btn.dataset.gesture);
+    });
+
+    document.getElementById('clearBtn').addEventListener('click', clearSentence);
+    document.getElementById('speakSentenceBtn').addEventListener('click', speakSentence);
+
+    // Refresh relative timestamps every second
+    setInterval(() => { if (history.length) renderHistory(); }, 1000);
+  </script>
+</body>
+</html>
