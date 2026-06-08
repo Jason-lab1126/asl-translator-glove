@@ -54,9 +54,69 @@
 
     /* ─── Header ───────────────────────────────────────────────────── */
     .header {
+      position: relative;
       text-align: center;
       padding-bottom: 2.5rem;
       border-bottom: 1px solid var(--border);
+    }
+
+    .header-ble {
+      position: absolute;
+      top: 0;
+      right: 0;
+    }
+
+    .ble-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem 0.875rem;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: var(--radius);
+      background: transparent;
+      color: var(--text-primary);
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: background 100ms ease, transform 100ms ease;
+    }
+
+    .ble-btn:hover {
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .ble-btn:active {
+      transform: scale(0.98);
+    }
+
+    .ble-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #34c759;
+      flex-shrink: 0;
+      animation: blePulse 2.5s ease-in-out infinite;
+    }
+
+    .ble-dot[hidden] {
+      display: none;
+    }
+
+    @keyframes blePulse {
+      0%, 100% { opacity: 1; }
+      50%      { opacity: 0.35; }
+    }
+
+    .ble-error {
+      margin-top: 0.75rem;
+      font-size: 12px;
+      color: var(--text-secondary);
+      letter-spacing: 0.02em;
+      text-transform: none;
+      line-height: 1.4;
     }
 
     .header h1 {
@@ -258,6 +318,8 @@
       .app { padding: 2rem 1.25rem 3rem; }
       .gesture-display { padding: 2.5rem 0 2rem; }
       .metrics { gap: 2rem; }
+      .header { padding-top: 2.5rem; }
+      .header-ble { top: 0; right: 0; }
     }
 
     .demo-btn {
@@ -363,14 +425,21 @@
 
     <!-- Header -->
     <header class="header">
+      <div class="header-ble">
+        <button class="ble-btn" id="bleConnectBtn" type="button">
+          <span class="ble-dot" id="bleDot" hidden aria-hidden="true"></span>
+          <span id="bleBtnLabel">Connect</span>
+        </button>
+      </div>
       <h1>ASL Translator Glove</h1>
       <p class="subtitle">EE 446 TinyML Final Project — UW Spring 2026</p>
+      <p class="ble-error" id="bleError" hidden></p>
     </header>
 
     <!-- Connection Status -->
     <div class="connection">
-      <span class="connection-dot" aria-hidden="true"></span>
-      <span>Connected to Jayson-Arduino</span>
+      <span class="connection-dot" id="connectionDot" aria-hidden="true" hidden></span>
+      <span id="connectionLabel">Not connected — use demo buttons or connect via Bluetooth</span>
     </div>
 
     <!-- Main Gesture Display -->
@@ -427,15 +496,12 @@
       </div>
     </section>
 
-    <footer class="footer">Demo mode — BLE integration coming soon</footer>
+    <footer class="footer">Demo buttons work alongside live BLE connection</footer>
   </div>
 
   <script>
     /* ═══════════════════════════════════════════════════════════════════
-       ASL Translator Glove — Demo Frontend
-
-       BLE integration point: call onGestureReceived(gesture, confidence, latency)
-       whenever the glove sends a recognized gesture over Bluetooth.
+       ASL Translator Glove — Demo Frontend + Web Bluetooth
        ═══════════════════════════════════════════════════════════════════ */
 
     // ─── Constants ────────────────────────────────────────────────────
@@ -465,6 +531,12 @@
     const sentenceDisplay  = document.getElementById('sentenceDisplay');
     const demoGrid         = document.getElementById('demoGrid');
     const speakSentenceBtn = document.getElementById('speakSentenceBtn');
+    const bleConnectBtn    = document.getElementById('bleConnectBtn');
+    const bleBtnLabel      = document.getElementById('bleBtnLabel');
+    const bleDot           = document.getElementById('bleDot');
+    const bleError         = document.getElementById('bleError');
+    const connectionDot    = document.getElementById('connectionDot');
+    const connectionLabel  = document.getElementById('connectionLabel');
 
     // ─── Core API ─────────────────────────────────────────────────────
 
@@ -484,7 +556,7 @@
       }
     }
 
-    // Expose for future BLE handler
+    // Expose for external callers
     window.onGestureReceived = onGestureReceived;
 
     // ─── Display ──────────────────────────────────────────────────────
@@ -586,7 +658,113 @@
       window.speechSynthesis.speak(utterance);
     }
 
-    // ─── Simulation (remove when BLE is wired up) ───────────────────
+    // ─── Web Bluetooth ──────────────────────────────────────────────
+
+    const BLE_DEVICE_NAME  = 'ASL_Glove';
+    const BLE_SERVICE_UUID = '19b10000-e8f2-537e-4f6c-d104768a1214';
+    const BLE_CHAR_UUID    = '19b10001-e8f2-537e-4f6c-d104768a1214';
+
+    let bleDevice = null;
+    let bleCharacteristic = null;
+
+    function isBluetoothSupported() {
+      return !!navigator.bluetooth;
+    }
+
+    function showBleError(message) {
+      bleError.textContent = message;
+      bleError.hidden = !message;
+    }
+
+    function setBleConnected(connected, deviceName = '') {
+      bleBtnLabel.textContent = connected ? 'Disconnect' : 'Connect';
+      bleDot.hidden = !connected;
+      connectionDot.hidden = !connected;
+      connectionLabel.textContent = connected
+        ? `Connected to ${deviceName || BLE_DEVICE_NAME}`
+        : 'Not connected — use demo buttons or connect via Bluetooth';
+    }
+
+    function handleBLENotification(event) {
+      try {
+        const value = event.target.value;
+        const json = JSON.parse(new TextDecoder('utf-8').decode(value));
+
+        if (!json.gesture) {
+          console.warn('[BLE] Notification missing gesture field:', json);
+          return;
+        }
+
+        const confidence = json.confidence <= 1
+          ? Math.round(json.confidence * 100)
+          : Math.round(json.confidence);
+        const latencyMs = Math.round(json.latency_us / 1000);
+
+        onGestureReceived(json.gesture, confidence, latencyMs);
+      } catch (err) {
+        console.error('[BLE] Failed to parse notification:', err);
+      }
+    }
+
+    function handleBLEDisconnect() {
+      bleDevice = null;
+      bleCharacteristic = null;
+      setBleConnected(false);
+    }
+
+    async function connectBLE() {
+      if (!isBluetoothSupported()) {
+        showBleError('Web Bluetooth not supported in this browser. Use Chrome or Edge.');
+        return;
+      }
+
+      showBleError('');
+
+      try {
+        const device = await navigator.bluetooth.requestDevice({
+          filters: [{ name: BLE_DEVICE_NAME }],
+          optionalServices: [BLE_SERVICE_UUID],
+        });
+
+        device.addEventListener('gattserverdisconnected', handleBLEDisconnect);
+
+        const server = await device.gatt.connect();
+        const service = await server.getPrimaryService(BLE_SERVICE_UUID);
+        const characteristic = await service.getCharacteristic(BLE_CHAR_UUID);
+
+        await characteristic.startNotifications();
+        characteristic.addEventListener('characteristicvaluechanged', handleBLENotification);
+
+        bleDevice = device;
+        bleCharacteristic = characteristic;
+        setBleConnected(true, device.name || BLE_DEVICE_NAME);
+      } catch (err) {
+        if (err.name === 'NotFoundError' || err.name === 'AbortError') {
+          return;
+        }
+        console.error('[BLE] Connection failed:', err);
+        showBleError('Connection failed. Check that the glove is on and nearby.');
+        handleBLEDisconnect();
+      }
+    }
+
+    function disconnectBLE() {
+      if (bleDevice?.gatt?.connected) {
+        bleDevice.gatt.disconnect();
+      } else {
+        handleBLEDisconnect();
+      }
+    }
+
+    function handleBleConnectClick() {
+      if (bleDevice?.gatt?.connected) {
+        disconnectBLE();
+      } else {
+        connectBLE();
+      }
+    }
+
+    // ─── Simulation ───────────────────────────────────────────────────
 
     function randomConfidence() {
       return Math.floor(Math.random() * 30) + 70;
@@ -614,6 +792,11 @@
 
     document.getElementById('clearBtn').addEventListener('click', clearSentence);
     document.getElementById('speakSentenceBtn').addEventListener('click', speakSentence);
+    bleConnectBtn.addEventListener('click', handleBleConnectClick);
+
+    if (!isBluetoothSupported()) {
+      showBleError('Web Bluetooth not supported in this browser. Use Chrome or Edge.');
+    }
 
     // Refresh relative timestamps every second
     setInterval(() => { if (history.length) renderHistory(); }, 1000);
