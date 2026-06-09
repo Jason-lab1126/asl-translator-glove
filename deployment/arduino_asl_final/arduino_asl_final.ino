@@ -1,83 +1,61 @@
 /*
-  ASL Translator Glove — Final Sketch
-  EE 446 TinyML Final Project, Spring 2026
-  
-  Reads IMU, runs quantized model, streams predictions over BLE
-  to a paired web app for display + TTS.
-  
-  Based on Lab 9 IMU Classifier (Harvard TinyMLx).
-  
-  BLE Service UUID: 19b10000-e8f2-537e-4f6c-d104768a1214
-  BLE Char UUID:    19b10001-e8f2-537e-4f6c-d104768a1214
-  Payload (JSON):
-    {"gesture":"HELLO","confidence":0.92,"latency_us":12345}
-*/
+ * ASL Translator Glove — Final Sketch
+ * EE 446 TinyML Final Project · Spring 2026
+ *
+ * Reads 6-axis IMU (BMI270 on Nano 33 BLE Sense Rev2),
+ * runs Edge Impulse INT8 quantized classifier (8-class ASL),
+ * applies confidence threshold, broadcasts JSON over BLE
+ * to a paired web app for display + TTS.
+ *
+ * Trained model: 92.7% test accuracy (INT8 quantized)
+ * Vocabulary: HELLO, THANK_YOU, HELP, GOODBYE, STOP, MORE, EAT, WATER
+ *
+ * BLE Service: 19b10000-e8f2-537e-4f6c-d104768a1214
+ * BLE Char:    19b10001-e8f2-537e-4f6c-d104768a1214
+ * Payload (JSON):
+ *   {"gesture":"HELLO","confidence":0.92,"latency_us":63000}
+ */
 
-#define USE_NANO_33_BLE_REV2_IMU 1
-
-#if USE_NANO_33_BLE_REV2_IMU
-  #include <Arduino_BMI270_BMM150.h>
-#else
-  #include <Arduino_LSM9DS1.h>
-#endif
-
-#include <TensorFlowLite.h>
+#include <asl-translator-glove_inferencing.h>
+#include <Arduino_BMI270_BMM150.h>   // Rev2 IMU
 #include <ArduinoBLE.h>
 
-#include "tensorflow/lite/micro/all_ops_resolver.h"
-#include "tensorflow/lite/micro/micro_error_reporter.h"
-#include "tensorflow/lite/micro/micro_interpreter.h"
+/* === Config === */
+#define CONVERT_G_TO_MS2      9.80665f
+#define MAX_ACCEPTED_RANGE    2.0f
+#define CONFIDENCE_THRESHOLD  0.70f   // below this → "UNKNOWN"
 
-#include "model.h"
-
-// === Config ===
-const float accelerationThreshold = 2.5;  // G's, motion trigger
-const int   numSamples            = 119;
-const float CONFIDENCE_THRESHOLD  = 0.70; // below this → "UNKNOWN"
-
-int samplesRead = numSamples;
-
-// === TFLite Micro globals ===
-tflite::MicroErrorReporter tflErrorReporter;
-tflite::AllOpsResolver tflOpsResolver;
-
-const tflite::Model* tflModel = nullptr;
-tflite::MicroInterpreter* tflInterpreter = nullptr;
-TfLiteTensor* tflInputTensor = nullptr;
-TfLiteTensor* tflOutputTensor = nullptr;
-
-constexpr int tensorArenaSize = 16 * 1024;
-byte tensorArena[tensorArenaSize];
-
-// === Gesture vocabulary (8 ASL signs) ===
-// NOTE: Currently using Lab 9's 2-class model.h as placeholder.
-// When Praxides' 8-class model.h is ready, replace model.h and uncomment full list.
-const char* GESTURES[] = {
-  "hi",   // placeholder — will become HELLO
-  "sup"   // placeholder — will become THANK_YOU / HELP / GOODBYE / STOP / MORE / EAT / WATER
-};
-
-// Final 8-class list (uncomment when model.h is updated):
-// const char* GESTURES[] = {
-//   "HELLO", "THANK_YOU", "HELP", "GOODBYE",
-//   "STOP", "MORE", "EAT", "WATER"
-// };
-
-#define NUM_GESTURES (sizeof(GESTURES) / sizeof(GESTURES[0]))
-
-// === BLE setup ===
+/* === BLE === */
 BLEService gestureService("19b10000-e8f2-537e-4f6c-d104768a1214");
 BLEStringCharacteristic gestureChar(
   "19b10001-e8f2-537e-4f6c-d104768a1214",
   BLERead | BLENotify,
-  120  // max payload length
+  120
 );
 
+/* === Inference buffer === */
+static bool debug_nn = false;
+static uint32_t run_inference_every_ms = 200;
+static rtos::Thread inference_thread(osPriorityLow);
+static float buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE] = { 0 };
+static float inference_buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE];
+
+/* === Track last sent gesture (avoid spamming BLE) === */
+static String last_sent_gesture = "";
+static unsigned long last_sent_ms = 0;
+
+/* Forward decls */
+void run_inference_background();
+float ei_get_sign(float number) { return (number >= 0.0) ? 1.0 : -1.0; }
+
+/* ============================================================
+ *  setup
+ * ============================================================ */
 void setup() {
-  Serial.begin(9600);
-  // Don't block forever waiting for Serial — we want BLE to work without a USB host
-  unsigned long serialStart = millis();
-  while (!Serial && (millis() - serialStart) < 3000);
+  Serial.begin(115200);
+  unsigned long t0 = millis();
+  while (!Serial && (millis() - t0) < 3000);
+  Serial.println("ASL Translator Glove — starting up");
 
   // --- IMU init ---
   if (!IMU.begin()) {
@@ -87,19 +65,13 @@ void setup() {
   Serial.print("Accel rate = "); Serial.print(IMU.accelerationSampleRate()); Serial.println(" Hz");
   Serial.print("Gyro rate  = "); Serial.print(IMU.gyroscopeSampleRate());    Serial.println(" Hz");
 
-  // --- TFLite Micro init ---
-  tflModel = tflite::GetModel(model);
-  tflInterpreter = new tflite::MicroInterpreter(
-    tflModel, tflOpsResolver, tensorArena, tensorArenaSize, &tflErrorReporter
-  );
-
-  TfLiteStatus allocateStatus = tflInterpreter->AllocateTensors();
-  if (allocateStatus != kTfLiteOk) {
-    Serial.println("AllocateTensors() failed. Try increasing tensorArenaSize.");
+  // --- sanity check: model expects 6 axes ---
+  if (EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME != 6) {
+    Serial.print("ERR: EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME = ");
+    Serial.print(EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME);
+    Serial.println(" (expected 6 for accX/Y/Z + gyrX/Y/Z)");
     while (1);
   }
-  tflInputTensor  = tflInterpreter->input(0);
-  tflOutputTensor = tflInterpreter->output(0);
 
   // --- BLE init ---
   if (!BLE.begin()) {
@@ -107,91 +79,118 @@ void setup() {
     while (1);
   }
   BLE.setLocalName("ASL_Glove");
+  BLE.setDeviceName("ASL_Glove");
   BLE.setAdvertisedService(gestureService);
   gestureService.addCharacteristic(gestureChar);
   BLE.addService(gestureService);
   gestureChar.writeValue("{\"gesture\":\"READY\",\"confidence\":0.00,\"latency_us\":0}");
   BLE.advertise();
   Serial.println("BLE advertising as 'ASL_Glove'");
+
+  // --- start inference thread ---
+  inference_thread.start(mbed::callback(&run_inference_background));
 }
 
+/* ============================================================
+ *  Background inference thread
+ * ============================================================ */
+void run_inference_background() {
+  // wait until first buffer is filled
+  delay((EI_CLASSIFIER_INTERVAL_MS * EI_CLASSIFIER_RAW_SAMPLE_COUNT) + 100);
+
+  while (1) {
+    // copy buffer for inference
+    memcpy(inference_buffer, buffer, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE * sizeof(float));
+
+    signal_t signal;
+    int err = numpy::signal_from_buffer(inference_buffer, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, &signal);
+    if (err != 0) {
+      Serial.print("Failed to create signal ("); Serial.print(err); Serial.println(")");
+      return;
+    }
+
+    ei_impulse_result_t result = { 0 };
+    unsigned long inf_start = micros();
+    err = run_classifier(&signal, &result, debug_nn);
+    unsigned long latency_us = micros() - inf_start;
+
+    if (err != EI_IMPULSE_OK) {
+      Serial.print("ERR: classifier failed ("); Serial.print(err); Serial.println(")");
+      return;
+    }
+
+    // find argmax
+    float max_prob = 0.0;
+    int   max_idx  = 0;
+    for (size_t i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
+      if (result.classification[i].value > max_prob) {
+        max_prob = result.classification[i].value;
+        max_idx  = i;
+      }
+    }
+
+    // confidence threshold
+    String predicted;
+    if (max_prob < CONFIDENCE_THRESHOLD) {
+      predicted = "UNKNOWN";
+    } else {
+      predicted = String(result.classification[max_idx].label);
+    }
+
+    // Serial debug
+    Serial.print("Gesture: "); Serial.print(predicted);
+    Serial.print("  Conf: ");  Serial.print(max_prob, 3);
+    Serial.print("  Latency: "); Serial.print(latency_us); Serial.println(" us");
+
+    // BLE output — only send when gesture is new (or every 1s as heartbeat)
+    unsigned long now = millis();
+    if (predicted != last_sent_gesture || (now - last_sent_ms) > 1000) {
+      char payload[120];
+      snprintf(payload, sizeof(payload),
+        "{\"gesture\":\"%s\",\"confidence\":%.2f,\"latency_us\":%lu}",
+        predicted.c_str(), max_prob, latency_us);
+      gestureChar.writeValue(payload);
+      last_sent_gesture = predicted;
+      last_sent_ms = now;
+    }
+
+    delay(run_inference_every_ms);
+  }
+}
+
+/* ============================================================
+ *  Main loop: fill buffer with 6-axis IMU data + poll BLE
+ * ============================================================ */
 void loop() {
-  // Poll BLE (handles connect/disconnect events)
-  BLE.poll();
+  while (1) {
+    BLE.poll();   // handle BLE events
 
-  float aX, aY, aZ, gX, gY, gZ;
+    uint64_t next_tick = micros() + (EI_CLASSIFIER_INTERVAL_MS * 1000);
 
-  // === Wait for significant motion ===
-  while (samplesRead == numSamples) {
-    BLE.poll();
-    if (IMU.accelerationAvailable()) {
-      IMU.readAcceleration(aX, aY, aZ);
-      float aSum = fabs(aX) + fabs(aY) + fabs(aZ);
-      if (aSum >= accelerationThreshold) {
-        samplesRead = 0;
-        break;
-      }
-    }
-  }
+    // roll buffer back 6 slots (1 sample = 6 axes)
+    numpy::roll(buffer, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, -6);
 
-  // === Collect numSamples worth of IMU data ===
-  while (samplesRead < numSamples) {
-    if (IMU.accelerationAvailable() && IMU.gyroscopeAvailable()) {
-      IMU.readAcceleration(aX, aY, aZ);
-      IMU.readGyroscope(gX, gY, gZ);
+    // read latest 6-axis IMU sample to end of buffer
+    float ax, ay, az, gx, gy, gz;
+    if (IMU.accelerationAvailable()) IMU.readAcceleration(ax, ay, az);
+    if (IMU.gyroscopeAvailable())    IMU.readGyroscope(gx, gy, gz);
 
-      // Normalize to [0, 1]
-      tflInputTensor->data.f[samplesRead * 6 + 0] = (aX + 4.0) / 8.0;
-      tflInputTensor->data.f[samplesRead * 6 + 1] = (aY + 4.0) / 8.0;
-      tflInputTensor->data.f[samplesRead * 6 + 2] = (aZ + 4.0) / 8.0;
-      tflInputTensor->data.f[samplesRead * 6 + 3] = (gX + 2000.0) / 4000.0;
-      tflInputTensor->data.f[samplesRead * 6 + 4] = (gY + 2000.0) / 4000.0;
-      tflInputTensor->data.f[samplesRead * 6 + 5] = (gZ + 2000.0) / 4000.0;
+    // clip accel to ±2G
+    if (fabs(ax) > MAX_ACCEPTED_RANGE) ax = ei_get_sign(ax) * MAX_ACCEPTED_RANGE;
+    if (fabs(ay) > MAX_ACCEPTED_RANGE) ay = ei_get_sign(ay) * MAX_ACCEPTED_RANGE;
+    if (fabs(az) > MAX_ACCEPTED_RANGE) az = ei_get_sign(az) * MAX_ACCEPTED_RANGE;
 
-      samplesRead++;
-
-      if (samplesRead == numSamples) {
-        // === Inference + latency measurement ===
-        unsigned long t0 = micros();
-        TfLiteStatus invokeStatus = tflInterpreter->Invoke();
-        unsigned long latency_us = micros() - t0;
-
-        if (invokeStatus != kTfLiteOk) {
-          Serial.println("Invoke failed!");
-          return;
-        }
-
-        // === Find argmax + confidence ===
-        float maxProb = 0.0;
-        int   maxIdx  = 0;
-        for (int i = 0; i < NUM_GESTURES; i++) {
-          float p = tflOutputTensor->data.f[i];
-          if (p > maxProb) {
-            maxProb = p;
-            maxIdx  = i;
-          }
-        }
-
-        // === Confidence threshold ===
-        const char* predicted;
-        if (maxProb < CONFIDENCE_THRESHOLD) {
-          predicted = "UNKNOWN";
-        } else {
-          predicted = GESTURES[maxIdx];
-        }
-
-        // === Serial debug ===
-        Serial.print("Gesture: "); Serial.print(predicted);
-        Serial.print("  Confidence: "); Serial.print(maxProb, 3);
-        Serial.print("  Latency: "); Serial.print(latency_us); Serial.println(" us");
-
-        // === BLE output (JSON) ===
-        char payload[120];
-        snprintf(payload, sizeof(payload),
-          "{\"gesture\":\"%s\",\"confidence\":%.2f,\"latency_us\":%lu}",
-          predicted, maxProb, latency_us);
-        gestureChar.writeValue(payload);
-      }
-    }
+    buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 6] = ax * CONVERT_G_TO_MS2;
+    buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 5] = ay * CONVERT_G_TO_MS2;
+    buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 4] = az * CONVERT_G_TO_MS2;
+    buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 3] = gx;  // gyro: deg/s, no conversion
+    buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 2] = gy;
+    buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 1] = gz;
+    Serial.print("ax="); Serial.print(ax); Serial.print(" gz="); Serial.println(gz);
+    // wait for next tick
+    uint64_t time_to_wait = next_tick - micros();
+    delay((int)floor((float)time_to_wait / 1000.0f));
+    delayMicroseconds(time_to_wait % 1000);
   }
 }
+

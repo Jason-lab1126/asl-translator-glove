@@ -722,7 +722,7 @@
 
       try {
         const device = await navigator.bluetooth.requestDevice({
-          filters: [{ name: BLE_DEVICE_NAME }],
+          acceptAllDevices: true,
           optionalServices: [BLE_SERVICE_UUID],
         });
 
