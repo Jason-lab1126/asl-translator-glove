@@ -87,19 +87,13 @@ void setup() {
   BLE.advertise();
   Serial.println("BLE advertising as 'ASL_Glove'");
 
-  // --- start inference thread ---
-  inference_thread.start(mbed::callback(&run_inference_background));
 }
 
 /* ============================================================
  *  Background inference thread
  * ============================================================ */
 void run_inference_background() {
-  // wait until first buffer is filled
-  delay((EI_CLASSIFIER_INTERVAL_MS * EI_CLASSIFIER_RAW_SAMPLE_COUNT) + 100);
-
-  while (1) {
-    // copy buffer for inference
+  // copy buffer for inference
     memcpy(inference_buffer, buffer, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE * sizeof(float));
 
     signal_t signal;
@@ -153,9 +147,6 @@ void run_inference_background() {
       last_sent_gesture = predicted;
       last_sent_ms = now;
     }
-
-    delay(run_inference_every_ms);
-  }
 }
 
 /* ============================================================
@@ -186,11 +177,19 @@ void loop() {
     buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 3] = gx;  // gyro: deg/s, no conversion
     buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 2] = gy;
     buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 1] = gz;
-    Serial.print("ax="); Serial.print(ax); Serial.print(" gz="); Serial.println(gz);
     // wait for next tick
-    uint64_t time_to_wait = next_tick - micros();
-    delay((int)floor((float)time_to_wait / 1000.0f));
-    delayMicroseconds(time_to_wait % 1000);
+    uint64_t now_us = micros();
+    if (next_tick > now_us) {
+      uint64_t time_to_wait = next_tick - now_us;
+      delay((int)(time_to_wait / 1000));
+      delayMicroseconds(time_to_wait % 1000);
+    }
+
+    // every full window, run inference once
+    static int sample_count = 0;
+    if (++sample_count >= EI_CLASSIFIER_RAW_SAMPLE_COUNT) {
+      sample_count = 0;
+      run_inference_background();
+    }
   }
 }
-
