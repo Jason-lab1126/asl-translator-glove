@@ -695,6 +695,11 @@
           return;
         }
 
+        // Boot handshake only — don't show or speak it
+        if (json.gesture === 'READY') {
+          return;
+        }
+
         const confidence = json.confidence <= 1
           ? Math.round(json.confidence * 100)
           : Math.round(json.confidence);
@@ -722,7 +727,7 @@
 
       try {
         const device = await navigator.bluetooth.requestDevice({
-          acceptAllDevices: true,
+          filters: [{ name: BLE_DEVICE_NAME }],
           optionalServices: [BLE_SERVICE_UUID],
         });
 

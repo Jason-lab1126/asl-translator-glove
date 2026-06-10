@@ -21,9 +21,11 @@
 #include <ArduinoBLE.h>
 
 /* === Config === */
-#define CONVERT_G_TO_MS2      9.80665f
-#define MAX_ACCEPTED_RANGE    2.0f
-#define CONFIDENCE_THRESHOLD  0.70f   // below this → "UNKNOWN"
+#define CONVERT_G_TO_MS2       9.80665f
+#define MAX_ACCEPTED_RANGE     2.0f
+#define CONFIDENCE_THRESHOLD   0.70f   // below this → "UNKNOWN"
+#define MOTION_GYRO_THRESHOLD  12.0f   // avg |gyro| deg/s; below = idle, skip inference
+#define GESTURE_COOLDOWN_MS    1200    // after a confident detection, pause before next
 
 /* === BLE === */
 BLEService gestureService("19b10000-e8f2-537e-4f6c-d104768a1214");
@@ -35,18 +37,57 @@ BLEStringCharacteristic gestureChar(
 
 /* === Inference buffer === */
 static bool debug_nn = false;
-static uint32_t run_inference_every_ms = 200;
-static rtos::Thread inference_thread(osPriorityLow);
 static float buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE] = { 0 };
 static float inference_buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE];
 
-/* === Track last sent gesture (avoid spamming BLE) === */
+/* === Track last output (avoid spamming BLE / Serial) === */
 static String last_sent_gesture = "";
-static unsigned long last_sent_ms = 0;
+static String last_printed_gesture = "";
+static unsigned long last_detection_ms = 0;
 
 /* Forward decls */
 void run_inference_background();
+void emit_gesture(const String &predicted, float confidence, unsigned long latency_us);
 float ei_get_sign(float number) { return (number >= 0.0) ? 1.0 : -1.0; }
+
+// True when the current window has enough gyro activity to be a real gesture.
+static bool window_has_motion(const float *buf) {
+  float gyro_energy = 0.0f;
+  for (int i = 0; i < EI_CLASSIFIER_RAW_SAMPLE_COUNT; i++) {
+    int b = i * EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME + 3;
+    gyro_energy += fabs(buf[b]) + fabs(buf[b + 1]) + fabs(buf[b + 2]);
+  }
+  gyro_energy /= EI_CLASSIFIER_RAW_SAMPLE_COUNT;
+  return gyro_energy >= MOTION_GYRO_THRESHOLD;
+}
+
+// Edge Impulse label → web app label (e.g. "THANK YOU" → "THANK_YOU").
+static String normalize_gesture_label(const char *label) {
+  String normalized = String(label);
+  normalized.replace(' ', '_');
+  return normalized;
+}
+
+// Send to Serial + BLE only when the prediction changes.
+void emit_gesture(const String &predicted, float confidence, unsigned long latency_us) {
+  if (predicted == last_printed_gesture) {
+    return;
+  }
+
+  Serial.print("Gesture: "); Serial.print(predicted);
+  Serial.print("  Conf: ");  Serial.print(confidence, 3);
+  Serial.print("  Latency: "); Serial.print(latency_us); Serial.println(" us");
+  last_printed_gesture = predicted;
+
+  if (predicted != last_sent_gesture) {
+    char payload[120];
+    snprintf(payload, sizeof(payload),
+      "{\"gesture\":\"%s\",\"confidence\":%.2f,\"latency_us\":%lu}",
+      predicted.c_str(), confidence, latency_us);
+    gestureChar.writeValue(payload);
+    last_sent_gesture = predicted;
+  }
+}
 
 /* ============================================================
  *  setup
@@ -93,60 +134,63 @@ void setup() {
  *  Background inference thread
  * ============================================================ */
 void run_inference_background() {
-  // copy buffer for inference
-    memcpy(inference_buffer, buffer, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE * sizeof(float));
+  unsigned long now = millis();
 
-    signal_t signal;
-    int err = numpy::signal_from_buffer(inference_buffer, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, &signal);
-    if (err != 0) {
-      Serial.print("Failed to create signal ("); Serial.print(err); Serial.println(")");
-      return;
+  // After a confident detection, skip further inference until cooldown ends.
+  if (last_detection_ms > 0 && (now - last_detection_ms) < GESTURE_COOLDOWN_MS) {
+    return;
+  }
+
+  // Skip inference when the glove is still — avoids idle false positives (HELLO / THANK YOU spam).
+  if (!window_has_motion(buffer)) {
+    if (last_printed_gesture != "IDLE") {
+      Serial.println("Idle — waiting for gesture motion");
+      last_printed_gesture = "IDLE";
     }
+    return;
+  }
 
-    ei_impulse_result_t result = { 0 };
-    unsigned long inf_start = micros();
-    err = run_classifier(&signal, &result, debug_nn);
-    unsigned long latency_us = micros() - inf_start;
+  memcpy(inference_buffer, buffer, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE * sizeof(float));
 
-    if (err != EI_IMPULSE_OK) {
-      Serial.print("ERR: classifier failed ("); Serial.print(err); Serial.println(")");
-      return;
+  signal_t signal;
+  int err = numpy::signal_from_buffer(inference_buffer, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, &signal);
+  if (err != 0) {
+    Serial.print("Failed to create signal ("); Serial.print(err); Serial.println(")");
+    return;
+  }
+
+  ei_impulse_result_t result = { 0 };
+  unsigned long inf_start = micros();
+  err = run_classifier(&signal, &result, debug_nn);
+  unsigned long latency_us = micros() - inf_start;
+
+  if (err != EI_IMPULSE_OK) {
+    Serial.print("ERR: classifier failed ("); Serial.print(err); Serial.println(")");
+    return;
+  }
+
+  float max_prob = 0.0;
+  int   max_idx  = 0;
+  for (size_t i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
+    if (result.classification[i].value > max_prob) {
+      max_prob = result.classification[i].value;
+      max_idx  = i;
     }
+  }
 
-    // find argmax
-    float max_prob = 0.0;
-    int   max_idx  = 0;
-    for (size_t i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
-      if (result.classification[i].value > max_prob) {
-        max_prob = result.classification[i].value;
-        max_idx  = i;
-      }
-    }
+  String predicted;
+  if (max_prob < CONFIDENCE_THRESHOLD) {
+    predicted = "UNKNOWN";
+  } else {
+    predicted = normalize_gesture_label(result.classification[max_idx].label);
+  }
 
-    // confidence threshold
-    String predicted;
-    if (max_prob < CONFIDENCE_THRESHOLD) {
-      predicted = "UNKNOWN";
-    } else {
-      predicted = String(result.classification[max_idx].label);
-    }
+  emit_gesture(predicted, max_prob, latency_us);
 
-    // Serial debug
-    Serial.print("Gesture: "); Serial.print(predicted);
-    Serial.print("  Conf: ");  Serial.print(max_prob, 3);
-    Serial.print("  Latency: "); Serial.print(latency_us); Serial.println(" us");
-
-    // BLE output — only send when gesture is new (or every 1s as heartbeat)
-    unsigned long now = millis();
-    if (predicted != last_sent_gesture || (now - last_sent_ms) > 1000) {
-      char payload[120];
-      snprintf(payload, sizeof(payload),
-        "{\"gesture\":\"%s\",\"confidence\":%.2f,\"latency_us\":%lu}",
-        predicted.c_str(), max_prob, latency_us);
-      gestureChar.writeValue(payload);
-      last_sent_gesture = predicted;
-      last_sent_ms = now;
-    }
+  // Start cooldown only after a confident gesture — lets the user reset between signs.
+  if (predicted != "UNKNOWN") {
+    last_detection_ms = now;
+  }
 }
 
 /* ============================================================
@@ -158,38 +202,43 @@ void loop() {
 
     uint64_t next_tick = micros() + (EI_CLASSIFIER_INTERVAL_MS * 1000);
 
-    // roll buffer back 6 slots (1 sample = 6 axes)
-    numpy::roll(buffer, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, -6);
+    if (IMU.accelerationAvailable() && IMU.gyroscopeAvailable()) {
+      // roll buffer back 6 slots (1 sample = 6 axes)
+      numpy::roll(buffer, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, -6);
 
-    // read latest 6-axis IMU sample to end of buffer
-    float ax, ay, az, gx, gy, gz;
-    if (IMU.accelerationAvailable()) IMU.readAcceleration(ax, ay, az);
-    if (IMU.gyroscopeAvailable())    IMU.readGyroscope(gx, gy, gz);
+      float ax, ay, az, gx, gy, gz;
+      IMU.readAcceleration(ax, ay, az);
+      IMU.readGyroscope(gx, gy, gz);
 
-    // clip accel to ±2G
-    if (fabs(ax) > MAX_ACCEPTED_RANGE) ax = ei_get_sign(ax) * MAX_ACCEPTED_RANGE;
-    if (fabs(ay) > MAX_ACCEPTED_RANGE) ay = ei_get_sign(ay) * MAX_ACCEPTED_RANGE;
-    if (fabs(az) > MAX_ACCEPTED_RANGE) az = ei_get_sign(az) * MAX_ACCEPTED_RANGE;
+      // clip accel to ±2G
+      if (fabs(ax) > MAX_ACCEPTED_RANGE) ax = ei_get_sign(ax) * MAX_ACCEPTED_RANGE;
+      if (fabs(ay) > MAX_ACCEPTED_RANGE) ay = ei_get_sign(ay) * MAX_ACCEPTED_RANGE;
+      if (fabs(az) > MAX_ACCEPTED_RANGE) az = ei_get_sign(az) * MAX_ACCEPTED_RANGE;
 
-    buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 6] = ax * CONVERT_G_TO_MS2;
-    buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 5] = ay * CONVERT_G_TO_MS2;
-    buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 4] = az * CONVERT_G_TO_MS2;
-    buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 3] = gx;  // gyro: deg/s, no conversion
-    buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 2] = gy;
-    buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 1] = gz;
+      buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 6] = ax * CONVERT_G_TO_MS2;
+      buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 5] = ay * CONVERT_G_TO_MS2;
+      buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 4] = az * CONVERT_G_TO_MS2;
+      buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 3] = gx;  // gyro: deg/s, no conversion
+      buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 2] = gy;
+      buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - 1] = gz;
+
+      // Warm up 2 s buffer, then infer every slice (~0.5 s) for faster response
+      static int total_samples = 0;
+      static int slice_count = 0;
+      if (++total_samples >= EI_CLASSIFIER_RAW_SAMPLE_COUNT) {
+        if (++slice_count >= EI_CLASSIFIER_SLICE_SIZE) {
+          slice_count = 0;
+          run_inference_background();
+        }
+      }
+    }
+
     // wait for next tick
     uint64_t now_us = micros();
     if (next_tick > now_us) {
       uint64_t time_to_wait = next_tick - now_us;
       delay((int)(time_to_wait / 1000));
       delayMicroseconds(time_to_wait % 1000);
-    }
-
-    // every full window, run inference once
-    static int sample_count = 0;
-    if (++sample_count >= EI_CLASSIFIER_RAW_SAMPLE_COUNT) {
-      sample_count = 0;
-      run_inference_background();
     }
   }
 }
