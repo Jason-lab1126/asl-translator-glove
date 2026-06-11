@@ -34,6 +34,10 @@ IMU (6-axis) → Window buffer → 1D-CNN (int8 quantized) → Confidence thresh
 
 Arduino Nano 33 BLE Sense (LSM9DS1 IMU, 256KB RAM, 1MB flash, BLE 5.0)
 
+## Edge Impulse Link
+
+https://studio.edgeimpulse.com/public/1022005/live
+
 ## Repo layout
 
 - data/ — IMU recordings, labeling protocol, sample CSVs
