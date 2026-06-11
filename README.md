@@ -49,9 +49,9 @@ Arduino Nano 33 BLE Sense (LSM9DS1 IMU, 256KB RAM, 1MB flash, BLE 5.0)
 | Track | Owner |
 |---|---|
 | Data collection + labeling | Carter |
-| Model architecture + training | Praxides |
-| Compression + quantization | papoochu |
-| Deployment + BLE + web app + system integration | Jayson |
+| Data collection + labeling | Praxides |
+| Data collection + labeling | Ananya |
+| Deployment + Model architecture + training + quantization + BLE + web app + system integration | Jayson |
 
 ## Status
 
