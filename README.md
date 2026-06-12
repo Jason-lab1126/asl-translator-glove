@@ -8,7 +8,7 @@ EE 446 TinyML Final Project · University of Washington · Spring 2026
 
 ## What it does
 
-You wear the device on your hand, sign one of 8 ASL words, and the system identifies the gesture in under 50ms and streams the result over Bluetooth to a paired display that speaks it aloud through TTS. Everything inference-side runs on-device — no cloud, no phone-side ML, no internet.
+You wear the device on your hand, sign one of 8 ASL words, and the system identifies the gesture in ~63ms and streams the result over Bluetooth to a paired display that speaks it aloud through TTS. Everything inference-side runs on-device — no cloud, no phone-side ML, no internet.
 
 **Vocabulary (v1):** HELLO, THANK YOU, HELP, GOODBYE, STOP, MORE, EAT, WATER
 
@@ -20,29 +20,29 @@ Roughly 70 million people worldwide use sign language as their primary form of c
 
 ## How it works
 
-IMU (6-axis) → Window buffer → 1D-CNN (int8 quantized) → Confidence threshold → BLE → Web display + TTS
+IMU (6-axis) → Window buffer → Spectral features → Dense network (int8 quantized) → Confidence threshold → BLE → Web display + TTS
 
 | Stage | What happens |
 |---|---|
 | Data collection | 4 signers, ~25 reps × 8 signs, IMU streamed via Edge Impulse |
-| Model | 1D-CNN, custom architecture, trained in TensorFlow |
-| Compression | INT8 post-training quantization, target <200KB |
+| Model | Spectral Analysis + dense network (64→32→16), trained in Edge Impulse |
+| Compression | INT8 post-training quantization (EI built-in for the deployed model; `compression/` documents the reference pipeline) |
 | Deployment | Arduino sketch with BLE characteristic + confidence-threshold rejection |
 | Display | Web Bluetooth app with live gesture, sentence builder, and TTS |
 
 ## Hardware
 
-Arduino Nano 33 BLE Sense (LSM9DS1 IMU, 256KB RAM, 1MB flash, BLE 5.0)
+Arduino Nano 33 BLE Sense Rev2 (BMI270 + BMM150 IMU, 256KB RAM, 1MB flash, BLE 5.0)
 
 ## Edge Impulse Link
 
-https://studio.edgeimpulse.com/public/1022005/live
+https://studio.edgeimpulse.com/public/1022005
 
 ## Repo layout
 
 - data/ — IMU recordings, labeling protocol, sample CSVs
 - model/ — Training notebooks, saved checkpoints
-- compression/ — Quantization scripts, accuracy/size/latency comparison tables
+- compression/ — INT8 quantization reference notebook (calibration → full-integer TFLite → C-header)
 - deployment/ — Arduino sketch, BLE protocol, on-device profiling
 - webapp/ — Web Bluetooth demo
 - report/ — Final report, figures
@@ -54,9 +54,9 @@ https://studio.edgeimpulse.com/public/1022005/live
 |---|---|
 | Data collection + labeling | Carter |
 | Data collection + labeling | Praxides |
-| Data collection + labeling | Ananya |
+| Data collection + INT8 quantization notebook | Ananya |
 | Deployment + Model architecture + training + quantization + BLE + web app + system integration | Jayson |
 
 ## Status
 
-Active development. Pipeline validated end-to-end on Lab 9 baseline. Working on real data + production model.
+Complete. 737 samples collected on-device, model trained and INT8-quantized in Edge Impulse (92.7% accuracy), deployed to the board, and streamed over BLE to the web app. See report/ for full results.
